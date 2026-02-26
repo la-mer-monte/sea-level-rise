@@ -41,6 +41,8 @@ const SC_CI: Record<string, { low: number; high: number }> = {
   "SSP5-8.5": { low: 500, high: 930 },
 };
 const SC_KEYS = Object.keys(SC);
+// Alias to work around recharts strict TypeScript overloads on the label prop
+const ReferenceLineAny = ReferenceLine as React.ComponentType<any>;
 
 function _pslFormula(dt: number, total75: number): number {
   const accelCoef = Math.max(0, (total75 - RATE_CY * 75) / (75 * 75));
@@ -911,7 +913,7 @@ function PageDisplay({
                     const by = Math.max(BY_MIN, Math.min(BY_MAX, p.birthYear));
                     if (by < 1900 || by > 2100) return null;
                     return (
-                      <ReferenceLine key={p.id} x={by}
+                      <ReferenceLineAny key={p.id} x={by}
                         stroke={genColor(p.generation)} strokeWidth={1}
                         label={(props: any) => {
                           const vb = props?.viewBox;
