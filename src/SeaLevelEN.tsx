@@ -57,11 +57,21 @@ function pslCI(yr: number, sc: string, b: "low" | "high"): number {
   return SL_NOW + _pslFormula(yr - CY, SC_CI[sc][b]);
 }
 
+// Life expectancy — linear interpolation between decennial anchors
+const LIFE_ANCHORS: [number, number][] = [
+  [1900, 55], [1910, 58], [1920, 62], [1930, 66], [1940, 70],
+  [1950, 74], [1960, 78], [1970, 81], [1980, 83], [1990, 85],
+  [2000, 87], [2010, 89],
+];
 function lifeExp(by: number): number {
-  if (by < 1900) return 55; if (by < 1910) return 58; if (by < 1920) return 62;
-  if (by < 1930) return 66; if (by < 1940) return 70; if (by < 1950) return 74;
-  if (by < 1960) return 78; if (by < 1970) return 81; if (by < 1980) return 83;
-  if (by < 1990) return 85; if (by < 2000) return 87; return 89;
+  if (by <= LIFE_ANCHORS[0][0]) return LIFE_ANCHORS[0][1];
+  const last = LIFE_ANCHORS[LIFE_ANCHORS.length - 1];
+  if (by >= last[0]) return last[1];
+  for (let i = 0; i < LIFE_ANCHORS.length - 1; i++) {
+    const [y0, v0] = LIFE_ANCHORS[i], [y1, v1] = LIFE_ANCHORS[i + 1];
+    if (by >= y0 && by < y1) return Math.round(v0 + (v1 - v0) * (by - y0) / (y1 - y0));
+  }
+  return last[1];
 }
 
 function calcStats(by: number, endYr: number) {
@@ -104,7 +114,7 @@ interface Person {
 
 type PageId = "welcome" | "family" | "display" | "cta";
 
-// ── PERSISTENCE ───────────────────────────────────────────────────────────────
+// ── PERSISTENCE & SHARING ────────────────────────────────────────────────────
 const STORAGE_KEY = "sea-level-en-v1";
 function loadState() {
   try {
@@ -114,6 +124,32 @@ function loadState() {
 }
 function saveState(data: object) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+}
+
+function encodeShare(persons: Person[]): string {
+  const data = persons.map(p => [p.name, p.birthYear, p.endYear, p.generation, p.deceased ? 1 : 0]);
+  return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+}
+function decodeShare(hash: string): Person[] | null {
+  try {
+    const b64 = hash.replace(/^#?share=/, "");
+    const data = JSON.parse(decodeURIComponent(escape(atob(b64))));
+    if (!Array.isArray(data)) return null;
+    return data.map((d: unknown[], i: number) => ({
+      id: i + 1,
+      name: String(d[0] ?? ""),
+      birthYear: Number(d[1]),
+      endYear: Number(d[2]),
+      generation: String(d[3] ?? "me"),
+      deceased: d[4] === 1,
+    }));
+  } catch { return null; }
+}
+function readHashShare(): Person[] | null {
+  if (typeof window === "undefined") return null;
+  const h = window.location.hash;
+  if (!h.startsWith("#share=")) return null;
+  return decodeShare(h);
 }
 
 // ── SHARED STYLES ─────────────────────────────────────────────────────────────
@@ -357,9 +393,18 @@ function PersonForm({
   const isFuture = p.birthYear > CY;
 
   const [byRaw, setByRaw] = useState(String(p.birthYear));
+  const [endRaw, setEndRaw] = useState(String(p.endYear));
 
+  // Sync endRaw when birthYear or deceased changes from parent
+  useEffect(() => { setEndRaw(String(p.endYear)); }, [p.endYear, p.deceased]);
   const prevById = useRef(p.id);
-  if (prevById.current !== p.id) prevById.current = p.id;
+  useEffect(() => {
+    if (prevById.current !== p.id) {
+      prevById.current = p.id;
+      setByRaw(String(p.birthYear));
+      setEndRaw(String(p.endYear));
+    }
+  });
 
   const byRawAsNum = parseInt(byRaw);
   const externalChanged = !isNaN(byRawAsNum) && byRawAsNum !== p.birthYear
@@ -372,6 +417,16 @@ function PersonForm({
     const clamped = Math.max(BY_MIN, Math.min(BY_MAX, v));
     setByRaw(String(clamped));
     onUpdate("birthYear", clamped);
+  };
+
+  const commitEndYear = (raw: string) => {
+    const v = parseInt(raw);
+    if (isNaN(v)) { setEndRaw(String(p.endYear)); return; }
+    const min = p.birthYear + 1;
+    const max = p.deceased ? CY - 1 : 2125;
+    const clamped = Math.max(min, Math.min(max, v));
+    setEndRaw(String(clamped));
+    onUpdate("endYear", clamped);
   };
 
   const byCommitted = parseInt(byRaw);
@@ -443,20 +498,20 @@ function PersonForm({
             <div style={{ ...S.label, color: "#f97316" }}>Year of death</div>
             <input
               type="number" min={p.birthYear + 1} max={CY - 1}
-              defaultValue={p.endYear}
-              key={`end-dead-${p.id}-${p.birthYear}`}
-              onBlur={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onUpdate("endYear", Math.max(p.birthYear + 1, Math.min(CY - 1, v))); }}
-              onKeyDown={e => { if (e.key === "Enter") { const v = parseInt((e.target as HTMLInputElement).value); if (!isNaN(v)) onUpdate("endYear", Math.max(p.birthYear + 1, Math.min(CY - 1, v))); }}}
+              value={endRaw}
+              onChange={e => setEndRaw(e.target.value)}
+              onBlur={e => commitEndYear(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") commitEndYear((e.target as HTMLInputElement).value); }}
               style={{ ...S.inputBase, border: "1px solid #f9741366", color: "#f97316" }}
             />
           </> : <>
             <div style={S.label}>Projection horizon</div>
             <input
               type="number" min={Math.max(CY, p.birthYear + 1)} max={2125}
-              defaultValue={p.endYear}
-              key={`end-alive-${p.id}-${p.birthYear}`}
-              onBlur={e => { const v = parseInt(e.target.value); if (!isNaN(v)) onUpdate("endYear", Math.max(p.birthYear + 1, Math.min(2125, v))); }}
-              onKeyDown={e => { if (e.key === "Enter") { const v = parseInt((e.target as HTMLInputElement).value); if (!isNaN(v)) onUpdate("endYear", Math.max(p.birthYear + 1, Math.min(2125, v))); }}}
+              value={endRaw}
+              onChange={e => setEndRaw(e.target.value)}
+              onBlur={e => commitEndYear(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") commitEndYear((e.target as HTMLInputElement).value); }}
               style={{ ...S.inputBase, border: endError ? "1px solid #f87171" : "1px solid #334155", color: "#94a3b8" }}
             />
             {endError && <div style={{ fontSize: 9, color: "#f87171", marginTop: 2 }}>{endError}</div>}
@@ -768,11 +823,40 @@ function PageFamily({
   );
 }
 
+// ── SHARE BUTTON ──────────────────────────────────────────────────────────────
+function ShareButton({ persons }: { persons: Person[] }) {
+  const [copied, setCopied] = useState(false);
+  const share = () => {
+    const url = `${window.location.origin}${window.location.pathname}#share=${encodeShare(persons)}`;
+    navigator.clipboard.writeText(url).then(() => {
+      window.location.hash = `share=${encodeShare(persons)}`;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }).catch(() => {
+      window.location.hash = `share=${encodeShare(persons)}`;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    });
+  };
+  return (
+    <button onClick={share} style={{
+      background: copied ? "#14532d" : "#1e293b",
+      border: `1px solid ${copied ? "#4ade80" : "#334155"}`,
+      borderRadius: 8, padding: "8px 16px", fontSize: 12, fontWeight: 600,
+      color: copied ? "#4ade80" : "#94a3b8", cursor: "pointer",
+      transition: "all .2s", display: "flex", alignItems: "center", gap: 6,
+    }}>
+      {copied ? "✓ Link copied!" : "🔗 Share this family"}
+    </button>
+  );
+}
+
 // ── PAGE 3 : RESULTS ──────────────────────────────────────────────────────────
 function PageDisplay({
-  persons, onNavigate,
+  persons, onNavigate, isShared, onReset,
 }: {
   persons: Person[]; onNavigate: (p: PageId) => void;
+  isShared: boolean; onReset: () => void;
 }) {
   const [tab, setTab] = useState<"stats" | "silhouettes">("stats");
   const [scenario, setScenario] = useState("SSP2-4.5");
@@ -845,6 +929,22 @@ function PageDisplay({
     <div style={{ minHeight: "100vh", background: "#0f172a", color: "#e2e8f0", padding: 20, fontFamily: "system-ui, sans-serif" }}>
       <div style={{ maxWidth: 980, margin: "0 auto" }}>
         <Breadcrumb current="display" onNavigate={onNavigate} />
+
+        {isShared && (
+          <div style={{
+            background: "#0a2a0a", border: "1px solid #166534", borderRadius: 10,
+            padding: "12px 16px", marginBottom: 16,
+            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          }}>
+            <span style={{ fontSize: 13, color: "#4ade80" }}>🔗 You are viewing a shared family.</span>
+            <button onClick={() => onNavigate("family")} style={{ ...S.btnGhost, fontSize: 11, padding: "3px 10px", color: "#86efac", borderColor: "#166534" }}>
+              ✏️ Edit
+            </button>
+            <button onClick={onReset} style={{ ...S.btnGhost, fontSize: 11, padding: "3px 10px", color: "#86efac", borderColor: "#166534" }}>
+              🔄 Start my own
+            </button>
+          </div>
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 20 }}>
           <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>📊 Results</h2>
@@ -1009,6 +1109,7 @@ function PageDisplay({
           <button onClick={() => onNavigate("family")} style={{ ...S.btnGhost }}>
             ← Edit people
           </button>
+          <ShareButton persons={persons} />
           <button onClick={() => onNavigate("cta")} style={{
             ...S.btnPrimary, background: "#14532d", border: "1px solid #166534",
             color: "#4ade80", fontSize: 13,
@@ -1252,15 +1353,17 @@ const INIT_PERSONS: Person[] = [
 ];
 
 export default function App() {
-  const saved = loadState();
+  const hashPersons = readHashShare();
+  const saved = hashPersons ? null : loadState();
 
-  const [page, setPage] = useState<PageId>(saved?.page === "display" ? "display" : "welcome");
+  const [isShared, setIsShared] = useState(!!hashPersons);
+  const [page, setPage] = useState<PageId>(hashPersons ? "display" : (saved?.page === "display" ? "display" : "welcome"));
   const [persons, setPersons] = useState<Person[]>(() =>
-    saved?.persons?.length ? saved.persons : INIT_PERSONS
+    hashPersons ?? (saved?.persons?.length ? saved.persons : INIT_PERSONS)
   );
   const [savedFlash, setSavedFlash] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
-  const idRef = useRef(Math.max(...(saved?.persons?.map((p: Person) => p.id) ?? [4]), 4) + 1);
+  const idRef = useRef(Math.max(...((hashPersons ?? saved?.persons)?.map((p: Person) => p.id) ?? [4]), 4) + 1);
 
   useEffect(() => { saveState({ persons, page }); }, [persons, page]);
   useEffect(() => {
@@ -1295,6 +1398,8 @@ export default function App() {
     idRef.current = 5;
     setPersons(fresh);
     setPage("family");
+    setIsShared(false);
+    window.location.hash = "";
     saveState({ persons: fresh, page: "family" });
     setResetConfirm(false);
   };
@@ -1338,6 +1443,8 @@ export default function App() {
         <PageDisplay
           persons={persons}
           onNavigate={navigate}
+          isShared={isShared}
+          onReset={doReset}
         />
       )}
       {page === "cta" && (
